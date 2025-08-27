@@ -14,7 +14,10 @@
     - nusenu.relayor
 
   pre_tasks:
-  
+
+  - name: Disable Tailscale DNS
+    command: tailscale up --ssh --accept-dns=false
+
  # - set_fact:
  #     ansible_python_interpreter: "/usr/bin/python3"
 
@@ -64,6 +67,23 @@
       name: system-bootstrap.service
       enabled: yes
       state: started
+
+  - name: Copy all ZT configs in configs/zerotier -> /var/lib/zerotier-one/networks.d
+    ansible.builtin.copy:
+      src: "{{ item }}"
+      dest: "/var/lib/zerotier-one/networks.d/{{ item | basename }}"
+      owner: zerotier-one
+      group: zerotier-one
+      mode: '0644'
+    loop: "{{ query('ansible.builtin.fileglob', 'configs/zerotier/*.conf') }}"
+    register: zt_config
+
+
+  - name: Restart zerotier-one if configuration changed
+    ansible.builtin.systemd:
+      name: zerotier-one
+      state: restarted
+    when: zt_config.changed
 
   - name: Ensure unbound is installed
     apt:
@@ -141,7 +161,7 @@
 
   post_tasks:
 
-  #- debug: 
+  #- debug:
   #  var: ansible_tailscale0.ipv4.address
 
   # - name: Enable MetricsPort in torrc
