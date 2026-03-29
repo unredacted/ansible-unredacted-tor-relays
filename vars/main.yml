@@ -49,7 +49,7 @@ tor_ExitRelay: True
 tor_ExitNoticePage: True
 
 # automatically detect IPv6 addresses and enable IPv6 ORPort
-tor_IPv6: True
+tor_IPv6: false
 
 # enable IPv6 exiting
 # the following var only matters if
@@ -83,59 +83,104 @@ tor_offline_masterkey_dir: ~/.tor/offlinemasterkeys
 tor_signingkeylifetime_days: 90
 
 # # this var is used for apt sources.list entries
-# tor_distribution_release: "{{ ansible_lsb.codename }}"
+tor_distribution_release: "{{ ansible_lsb.codename }}"
 
 # # filter potentially malicious input from relay-provided IPv4/v6 addresses
 # # https://docs.ansible.com/ansible/playbooks_filters_ipaddr.html
-# tor_available_public_ipv4s: "{{ ansible_all_ipv4_addresses| ipv4('address') | ipv4('public') }}"
-# tor_v4ips: "{{ tor_available_public_ipv4s[0:tor_maxPublicIPs] }}"
-# tor_ipv4_count: "{{ tor_v4ips | length|int }}"
+tor_available_public_ipv4s: "{{ ansible_all_ipv4_addresses |  ansible.utils.ipv4('address') | ansible.utils.ipaddr('public') }}"
+tor_v4ips: "{{ tor_available_public_ipv4s[0:tor_maxPublicIPs] }}"
+tor_ipv4_count: "{{ tor_v4ips | length | int }}"
 
 # # we can not use more IPv6 IPs than we have IPv4 IPs so we truncate (but fewer is ok)
-# tor_available_public_ipv6s: "{{ ansible_all_ipv6_addresses|ipv6('public')|ipv6('address') }}"
+tor_available_public_ipv6s: "{{ ansible_all_ipv6_addresses| ansible.utils.ipv6('address') | ansible.utils.ipaddr('public') }}"
+# we can not use more IPv6 IPs than we have IPv4 IPs so we truncate (but fewer is ok)
+tor_v6ips: "{{ tor_available_public_ipv6s[0:tor_ipv4_count|int] }}"
 
-tor_apt_update_cache: yes
-
-# This var enables autoconfiguration for OutboundBindAddressExit
-tor_dedicatedExitIP: False
-
-# the following line is commented out and handled in ip-list.yml until
-# https://github.com/ansible/ansible/issues/14829
-# gets fixed
-#tor_v6ips: "{{ tor_v6tmp[0:tor_ipv4_count|int]|ipv6('address') }}"
+tor_apt_update_cache: true
 
 tor_RunAsDaemon: 1
 
-tor_enableControlSocket: False
+tor_enableControlSocket: false
 
-# setting tor_alpha to True
-# will install tor alpha repos.
-# This is only supported for Debian/Ubuntu
-tor_alpha: False
-tor_nightly_builds: False
+tor_alpha: false
+tor_nightly_builds: false
 
-# known problem: requires manual adjustment with every major tor release
 tor_alpha_version: experimental
 
 # MetricsPort variables
-tor_enableMetricsPort: False
+tor_enableMetricsPort: false
 tor_MetricsPort_offset: 33300
 
 # prometheus (tor MetricsPort) related vars
-# On which host should we generate the prometheus scrape config? (delegate_to)
-# tor_prometheus_host: 127.0.0.1
-# # file path to the scrape config
-# tor_prometheus_scrape_file: "~/.tor/tor-prometheus-scrape-configs"
-# tor_blackbox_exporter_host: localhost:9115
-# tor_gen_blackbox_scrape_config: False
-# tor_blackbox_exporter_scheme: http
-# tor_blackbox_exporter_password: "{{ lookup('password', '~/.tor/blackbox_exporter_password') }}"
-
-# tor_prometheus_scrape_password_folder: "~/.tor/prometheus/scrape-passwords/"
-# tor_prometheus_scrape_port: 443
-# tor_gen_metricsport_htpasswd: False
-# tor_metricsport_htpasswd_file: "/etc/nginx/tor_metricsport_htpasswd"
-# tor_metricsport_htpasswd_file_owner: "www-data"
+tor_prometheus_group: prometheus
+tor_prometheus_host: 127.0.0.1
+tor_blackbox_exporter_scheme: http
+tor_blackbox_exporter_password: "{{ lookup('password', '~/.tor/blackbox_exporter_password') }}"
+tor_prometheus_scrape_password_folder: "~/.tor/prometheus/scrape-passwords/"
+tor_prometheus_scrape_port: 9111
+tor_gen_metricsport_htpasswd: false
+# the folder of the following file has to be present on the tor server already
+tor_metricsport_nginx_config_file: "/etc/nginx/promexporters/tor_metricsports_relayor.conf"
+tor_metricsport_htpasswd_file: "/etc/nginx/tor_metricsport_htpasswd"
+tor_metricsport_htpasswd_file_owner: "www-data"
+tor_metricsport_user: TorMetricsPortBehindNginx
+tor_prometheus_confd_folder: "/etc/prometheus/conf.d"
+tor_prometheus_scrape_file: "tor_{{ ansible_fqdn }}.yml"
+tor_gen_prometheus_alert_rules: false
+tor_prometheus_rules_file: "/etc/prometheus/rules/ansible-relayor.rules"
+tor_prometheus_alert_rules:
+  - alert: TorFlagRunningMissing
+    expr: 'tor_relay_flag{type="Running"} != 1'
+    for: 3h
+    labels:
+      severity: critical
+  - alert: TorFlagSybilPresent
+    expr: 'tor_relay_flag{type="Sybil"} != 0'
+    labels:
+      severity: critical
+  - alert: TorTCPPortsExhausted
+    expr: 'rate(tor_relay_load_tcp_exhaustion_total[15m]) > 0'
+    labels:
+      severity: critical
+  - alert: TorCertificateExpiryUnder15Days
+    expr: 'floor((tor_relay_signing_cert_expiry_timestamp - time())/86400) < 15'
+    labels:
+      severity: warning
+    annotations:
+      description: '{% raw %}{{ $labels.id }} key certificate will expire in {{ $value }} days.{% endraw %}'
+  - alert: TorCertificateExpiryUnder1Day
+    expr: 'floor((tor_relay_signing_cert_expiry_timestamp - time())/3600) < 24'
+    labels:
+      severity: critical
+    annotations:
+      description: '{% raw %}{{ $labels.id }} key certificate will expire and auto-shutdown in {{ $value }} hours.{% endraw %}'
+  - alert: TorHighDnsTimeoutRate
+    expr: '(sum by (instance)(rate(tor_relay_exit_dns_error_total{reason="tor_timeout"}[15m])))/(sum by (instance)(rate(tor_relay_exit_dns_query_total[15m])))*100 > 1.5'
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: 'DNS timeout rate is above 1.5% for over 10 minutes'
+      description: '{% raw %}{{ printf "%.3f" $value }}% of tor DNS queries on {{ $labels.instance }} result in a timeout.{% endraw %}'
+  - alert: TorOnionskinsDropped
+    expr: 'rate(tor_relay_load_onionskins_total{action="dropped"}[15m]) > 0'
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      description: '{% raw %}Relay {{ $labels.id }} is dropping onionskins for over 15 minutes.{% endraw %}'
+#  - alert: TorFlagExitChanged
+#    expr: 'changes(tor_relay_flag{type="Exit"}[15m]) > 0'
+#    labels:
+#      severity: informational
+#    annotations:
+#      description: "{% raw %}The exit flag changed on relay {{ $labels.id }}. Was that intended?{% endraw %}"
+#  - alert: TorFlagChanged
+#    expr: 'changes(tor_relay_flag{type=~"Guard|Fast|Stable"}[15m]) > 0'
+#    labels:
+#      severity: informational
+#    annotations:
+#      description: '{% raw %}The {{ $labels.type }} flag changed on relay {{ $labels.id }}.{% endraw %}'
 
 # Path to the tor-exit-notice HTML file
 tor_exit_notice_file: tor-exit-notice.html

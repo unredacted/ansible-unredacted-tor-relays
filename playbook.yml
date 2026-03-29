@@ -1,109 +1,97 @@
 ---
-
 - name: Run the nusenu.relayor role and include custom vars
   remote_user: root
   gather_facts: yes
-  hosts: '{{ target }}'
+  hosts: "{{ target }}"
   vars_files:
     - vars/main.yml
-  vars:
-    bridge_fingerprints:
-      - 255EE68D31F265C768A43907EB00449D674F0FD2
-      - 1A48C9E54CE95D9A123D46C6356DEAD8E5F61037
   roles:
     - nusenu.relayor
-
   pre_tasks:
+    - name: Disable Tailscale DNS
+      command: tailscale up --login-server=https://funnel.unredacted.net --ssh --accept-dns=false
 
-  - name: Disable Tailscale DNS
-    command: tailscale up --ssh --accept-dns=false
+    # - set_fact:
+    #     ansible_python_interpreter: "/usr/bin/python3"
 
- # - set_fact:
- #     ansible_python_interpreter: "/usr/bin/python3"
+    - name: Create system bootstrap script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/system-bootstrap.sh
+        mode: "0755"
+        content: |
+          #!/bin/bash
 
-  - name: Create system bootstrap script
-    ansible.builtin.copy:
-      dest: /usr/local/bin/system-bootstrap.sh
-      mode: '0755'
-      content: |
-        #!/bin/bash
+          IPT=/sbin/iptables
+          IP6T=/sbin/ip6tables
 
-        IPT=/sbin/iptables
-        IP6T=/sbin/ip6tables
+          # Clamp TCP MSS to 1354 for IPv4 on output chain
+          $IPT -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1354 2>/dev/null || \
+          $IPT -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1354
+          echo "IPv4 MSS clamp applied"
 
-        # Clamp TCP MSS to 1354 for IPv4 on input and output chains
-        $IPT -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1354 2>/dev/null || \
-        $IPT -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1354
-        $IPT -t mangle -C INPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1354 2>/dev/null || \
-        $IPT -t mangle -A INPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1354
-        echo "IPv4 MSS clamp applied"
+          # Clamp TCP MSS to 1334 for IPv4 on output chain
+          $IP6T -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1334 2>/dev/null || \
+          $IP6T -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1334
+          echo "IPv6 MSS clamp applied"
 
-        # Clamp TCP MSS to 1334 for IPv4 on input and output chains
-        $IP6T -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1334 2>/dev/null || \
-        $IP6T -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1334
-        $IP6T -t mangle -C INPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1334 2>/dev/null || \
-        $IP6T -t mangle -A INPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1334
-        echo "IPv6 MSS clamp applied"
+    - name: Create systemd unit to apply system bootstrap script boot
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/system-bootstrap.service
+        content: |
+          [Unit]
+          Description=Apply system bootstrap script
+          After=network-online.target
+          Wants=network-online.target
 
-  - name: Create systemd unit to apply system bootstrap script boot
-    ansible.builtin.copy:
-      dest: /etc/systemd/system/system-bootstrap.service
-      content: |
-        [Unit]
-        Description=Apply system bootstrap script
-        After=network-online.target
-        Wants=network-online.target
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/system-bootstrap.sh
+          RemainAfterExit=yes
 
-        [Service]
-        Type=oneshot
-        ExecStart=/usr/local/bin/system-bootstrap.sh
-        RemainAfterExit=yes
+          [Install]
+          WantedBy=multi-user.target
 
-        [Install]
-        WantedBy=multi-user.target
+    - name: Enable and start system bootstrap systemd service
+      ansible.builtin.systemd:
+        name: system-bootstrap.service
+        enabled: yes
+        state: started
 
-  - name: Enable and start system bootstrap systemd service
-    ansible.builtin.systemd:
-      name: system-bootstrap.service
-      enabled: yes
-      state: started
+    - name: Copy all ZT configs in configs/zerotier -> /var/lib/zerotier-one/networks.d
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/var/lib/zerotier-one/networks.d/{{ item | basename }}"
+        owner: zerotier-one
+        group: zerotier-one
+        mode: "0644"
+      loop: "{{ query('ansible.builtin.fileglob', 'configs/zerotier/*.conf') }}"
+      register: zt_config
 
-  - name: Copy all ZT configs in configs/zerotier -> /var/lib/zerotier-one/networks.d
-    ansible.builtin.copy:
-      src: "{{ item }}"
-      dest: "/var/lib/zerotier-one/networks.d/{{ item | basename }}"
-      owner: zerotier-one
-      group: zerotier-one
-      mode: '0644'
-    loop: "{{ query('ansible.builtin.fileglob', 'configs/zerotier/*.conf') }}"
-    register: zt_config
+    - name: Restart zerotier-one if configuration changed
+      ansible.builtin.systemd:
+        name: zerotier-one
+        state: restarted
+      when: zt_config.changed
 
+    - name: Ensure unbound is installed
+      apt:
+        name: unbound
+        state: present
 
-  - name: Restart zerotier-one if configuration changed
-    ansible.builtin.systemd:
-      name: zerotier-one
-      state: restarted
-    when: zt_config.changed
+    - name: Ensure unbound is enabled and started
+      ansible.builtin.service:
+        name: unbound
+        state: started
+        enabled: yes
 
-  - name: Ensure unbound is installed
-    apt:
-      name: unbound
-      state: present
-
-  - name: Ensure unbound is enabled and started
-    ansible.builtin.service:
-      name: unbound
-      state: started
-      enabled: yes
-
-  - name: Copy resolv.conf
-    copy:
-      src: files/resolv.conf
-      dest: /etc/resolv.conf
-      owner: root
-      group: root
-      mode: '0644'
-      backup: yes
+    - name: Copy resolv.conf
+      copy:
+        src: files/resolv.conf
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: "0644"
+        backup: yes
 
   # - name: Set net.ipv4.tcp_fin_timeout to defined value
   #   sysctl:
@@ -158,56 +146,3 @@
   #     state: present
   #     reload: yes
   #   when: ansible_virtualization_type != 'lxc'
-
-  post_tasks:
-
-  #- debug:
-  #  var: ansible_tailscale0.ipv4.address
-
-  # - name: Enable MetricsPort in torrc
-  #   lineinfile:
-  #     dest: "{{ tor_ConfDir }}/{{ item.0.ipv4 }}_{{ item.1.orport }}/torrc"
-  #     regexp: "{{ item.regexp }}"
-  #     line: "{{ item.line }}"
-  #     insertafter: EOF
-  #     state: present
-  #   with_items: "MetricsPort {{ raspi_boot_config_options }}:9035"
-
-  - name: Find Tor service files
-    shell: find /etc/systemd/system/multi-user.target.wants/ -name "tor@*.service"
-    register: tor_service_files
-
-  - name: Extract Tor service names
-    set_fact:
-      tor_services: "{{ tor_service_files.stdout_lines | map('basename') | list }}"
-
-  - name: Find torrc files
-    find:
-      paths: /etc/tor/instances/
-      patterns: 'torrc'
-      recurse: true
-    register: torrc_files
-
-  - name: Add fingerprints to MyFamily line if not already present
-    shell: |
-      for fingerprint in {{ bridge_fingerprints | join(' ') }}; do
-        if ! grep -qP "MyFamily\\s+.*\\b$fingerprint\\b" "{{ item.path }}"; then
-          if grep -qP "^MyFamily" "{{ item.path }}"; then
-            sed -i -E "s/(MyFamily\\s+.*)/\\1,$fingerprint/" "{{ item.path }}"
-          else
-            echo "MyFamily $fingerprint" >> "{{ item.path }}"
-          fi
-        fi
-      done
-    loop: "{{ torrc_files.files }}"
-
-  - name: Print Tor service names
-    debug:
-      var: tor_services
-
-  - name: Reload Tor after inserting meek bridge fingerprint
-    systemd:
-      name: "{{ item }}"
-      state: reloaded
-      daemon_reload: yes
-    loop: "{{ tor_services }}"
