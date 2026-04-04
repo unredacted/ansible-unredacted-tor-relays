@@ -1,12 +1,16 @@
 ---
 - name: Run the nusenu.relayor role and include custom vars
   remote_user: root
+  become: True
   gather_facts: yes
+  collections:
+    - debops.debops
   hosts: "{{ target }}"
   vars_files:
     - vars/main.yml
   roles:
-    - nusenu.relayor
+    - role: resolved
+    - role: nusenu.relayor
   pre_tasks:
     - name: Disable Tailscale DNS
       command: tailscale up --login-server=https://funnel.unredacted.net --ssh --accept-dns=false
@@ -73,25 +77,26 @@
         state: restarted
       when: zt_config.changed
 
-    - name: Ensure unbound is installed
-      apt:
-        name: unbound
-        state: present
-
-    - name: Ensure unbound is enabled and started
+    - name: Stop and disable Unbound before resolved takes over
       ansible.builtin.service:
         name: unbound
-        state: started
-        enabled: yes
+        state: stopped
+        enabled: no
+      failed_when: false
 
-    - name: Copy resolv.conf
-      copy:
-        src: files/resolv.conf
-        dest: /etc/resolv.conf
-        owner: root
-        group: root
-        mode: "0644"
-        backup: yes
+  post_tasks:
+    - name: Remove Unbound if previously installed
+      apt:
+        name: unbound
+        state: absent
+        purge: yes
+
+    - name: Ensure resolv.conf points to systemd-resolved stub
+      ansible.builtin.file:
+        path: /etc/resolv.conf
+        src: /run/systemd/resolve/stub-resolv.conf
+        state: link
+        force: yes
 
   # - name: Set net.ipv4.tcp_fin_timeout to defined value
   #   sysctl:

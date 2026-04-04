@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-This Ansible playbook deploys and manages Tor relay instances on Unredacted servers. It automates the configuration of Tor relays with custom settings for exit policies, DNS resolution, and system-level optimizations.
+This Ansible playbook deploys and manages Tor relay instances on Unredacted servers. It automates the configuration of Tor relays with custom settings for exit policies, DNS-over-TLS resolution via systemd-resolved, and system-level optimizations.
 
 ## Overview
 
@@ -14,6 +14,7 @@ This playbook uses the [`nusenu.relayor`](https://github.com/nusenu/ansible-rela
 - ZeroTier private network integration
 - System-level TCP MSS clamping to support tunneling software like ZeroTier
 - Prometheus metrics collection and alerting
+- DNS-over-TLS (DoT) resolution via systemd-resolved (Cloudflare, Mullvad, WikiMedia)
 - DNS resolver blacklisting to prevent censorship
 
 ## Prerequisites
@@ -37,7 +38,13 @@ This playbook uses the [`nusenu.relayor`](https://github.com/nusenu/ansible-rela
    cd ansible-unredacted-tor-relays
    ```
 
-2. Configure your inventory in `inventory.ini`:
+2. Install required Ansible collections and roles:
+   ```bash
+   ansible-galaxy collection install -r requirements.yml
+   ansible-galaxy role install -r requirements.yml
+   ```
+
+3. Configure your inventory in `inventory.ini`:
    ```ini
    [tor-relays]
    relay1.example.com ansible_user=root
@@ -47,12 +54,12 @@ This playbook uses the [`nusenu.relayor`](https://github.com/nusenu/ansible-rela
    target=tor-relays
    ```
 
-3. Customize variables in `vars/main.yml` as needed:
+4. Customize variables in `vars/main.yml` as needed:
    - Adjust `tor_ExitPolicy` for your exit policy
    - Modify `tor_ports` for different port configurations
    - Update contact information in `tor_ContactInfo`
 
-4. Run the playbook:
+5. Run the playbook:
    ```bash
    ansible-playbook playbook.yml -i inventory.ini
    ```
@@ -89,15 +96,14 @@ See `vars/main.yml` for the complete exit policy list.
 
 ```
 ansible-unredacted-tor-relays/
-├── ansible-unredacted-tor-relays-test/     # Test playbook and configuration
 ├── configs/
 │   └── zerotier/                           # ZeroTier network configurations
 ├── files/
-│   ├── nicknames.csv                       # Tor relay nickname mappings
-│   └── resolv.conf                         # Custom DNS resolver configuration
+│   └── nicknames.csv                       # Tor relay nickname mappings
 ├── vars/
 │   └── main.yml                            # Main variable definitions
 ├── playbook.yml                            # Main Ansible playbook
+├── requirements.yml                        # Ansible Galaxy dependencies
 └── README.md
 ```
 
@@ -109,7 +115,8 @@ ansible-unredacted-tor-relays/
 
 ### Network Configuration
 - ZeroTier private network integration
-- Custom DNS resolver support
+- DNS-over-TLS (DoT) via systemd-resolved with strict mode and DNSSEC
+- Upstream resolvers: Cloudflare, Mullvad, WikiMedia (all non-logging)
 - Blacklist of DNS resolvers to prevent censorship
 
 ### Monitoring
