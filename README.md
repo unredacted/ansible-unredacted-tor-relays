@@ -77,7 +77,7 @@ Key variables that can be customized in `vars/main.yml`:
 | `tor_ExitRelay` | Enable exit relay mode | `true` |
 | `tor_IPv6` | Enable IPv6 ORPort auto-detection | `false` |
 | `tor_IPv6Exit` | Enable IPv6 exiting | `true` |
-| `tor_maxPublicIPs` | Maximum public IPs to use | `1` |
+| `tor_instance_limit` | Maximum tor instances per server | `1` |
 | `tor_dnsresolver_blacklist` | Blacklisted DNS resolvers | Quad9 (enabled), Google/OpenDNS (commented) |
 
 ### Exit Policy

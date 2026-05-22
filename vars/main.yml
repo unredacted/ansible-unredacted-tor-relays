@@ -28,6 +28,11 @@ resolved__configuration:
     raw: 'DNS=1.1.1.1#cloudflare-dns.com 1.0.0.1#cloudflare-dns.com 2606:4700:4700::1111#cloudflare-dns.com 2606:4700:4700::1001#cloudflare-dns.com 194.242.2.2#dns.mullvad.net 2a07:e340::2#dns.mullvad.net 185.71.138.138#wikimedia-dns.org 2001:67c:930::1#wikimedia-dns.org'
     state: 'present'
 
+  # Route ALL queries to global DoT servers, never use per-link (gateway) DNS
+  - name: 'dns_domains'
+    raw: 'Domains=~.'
+    state: 'present'
+
   # No fallback — strict DoT only, never fall back to plaintext
   - name: 'fallback_dns'
     raw: 'FallbackDNS='
@@ -68,7 +73,7 @@ resolved__configuration:
 # =============================================================================
 
 # Non-default vars
-tor_ContactInfo: "email:admin[@]unredacted.org url:unredacted.org proof:uri-rsa ciissversion:2"
+tor_ContactInfo: "email:admin[@]unredacted.org url:unredacted.org proof:dns-familyid-ed25519 ciissversion:3"
 tor_nicknamefile: files/nicknames.csv
 tor_AbuseEmailAddress: "abuse[@]unredacted.org"
 
@@ -87,19 +92,16 @@ tor_prom_labels: {}
 tor_gen_ciiss_proof_files: False
 tor_ciiss_proof_folder: '~/.tor'
 
-# The tor_ports dictionary defines how many instances are created per
-# available IP address and what ports are used.
+# The tor_ports dictionary defines the ORPort/DirPort pairs per instance.
 # min entries: 1
 # max entries: 2
 tor_ports:
   - orport: 443
     dirport: 80
 
-# Limit the amount of used IP addresses
-# by default to 1, this limits the amount
-# of generated Tor instances to 2 per host.
-# Specifying tor_ips overwrites this limitation.
-tor_maxPublicIPs: 1
+# Cap tor instances per host. v26.1.0 default is 2;
+# we keep 1 to preserve current fleet behavior.
+tor_instance_limit: 1
 
 # We only use a single private IP by default since
 # we can not reliably tell whether we are NATed
@@ -151,17 +153,6 @@ tor_signingkeylifetime_days: 90
 
 # # this var is used for apt sources.list entries
 tor_distribution_release: "{{ ansible_lsb.codename }}"
-
-# # filter potentially malicious input from relay-provided IPv4/v6 addresses
-# # https://docs.ansible.com/ansible/playbooks_filters_ipaddr.html
-tor_available_public_ipv4s: "{{ ansible_all_ipv4_addresses |  ansible.utils.ipv4('address') | ansible.utils.ipaddr('public') }}"
-tor_v4ips: "{{ tor_available_public_ipv4s[0:tor_maxPublicIPs] }}"
-tor_ipv4_count: "{{ tor_v4ips | length | int }}"
-
-# # we can not use more IPv6 IPs than we have IPv4 IPs so we truncate (but fewer is ok)
-tor_available_public_ipv6s: "{{ ansible_all_ipv6_addresses| ansible.utils.ipv6('address') | ansible.utils.ipaddr('public') }}"
-# we can not use more IPv6 IPs than we have IPv4 IPs so we truncate (but fewer is ok)
-tor_v6ips: "{{ tor_available_public_ipv6s[0:tor_ipv4_count|int] }}"
 
 tor_apt_update_cache: true
 
