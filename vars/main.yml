@@ -91,7 +91,7 @@ tor_config:
   # Cap memory used for internal queues. Quoted: value contains a space.
   # NOTE: 512 MB is only just above Tor's ~256 MB floor; on a very busy exit a
   # cap this low can make Tor kill circuits under load spikes. Raise if needed.
-  MaxMemInQueues: "512 MB"
+  #MaxMemInQueues: "512 MB"
 
   # --- MetricsPort on the Tailscale interface (NO nginx / NO basic auth) ---
   # Keys are intentionally lowercase: the role's tor_config blocklist
