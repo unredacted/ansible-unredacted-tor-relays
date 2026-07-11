@@ -110,6 +110,15 @@ tor_config:
   # overload state publicly (we watch it privately via MetricsPort). Optional.
   OverloadStatistics: 0
 
+  # Declare the whole relay family the classic way (fingerprint list) ALONGSIDE
+  # the role's FamilyId. Tor still requires MyFamily during the family-key
+  # migration ("FamilyId was configured, but MyFamily was not") so clients on
+  # older Tor recognize the family; drop this once Tor stops emitting that warn.
+  # The list is assembled once on the control machine from the local offline
+  # master keys (see the MyFamily pre_task in playbook.yml). MyFamily is not in
+  # the role's tor_config blocklist, so it renders next to FamilyId per torrc.
+  MyFamily: "{{ tor_myfamily_build.stdout }}"
+
 tor_prom_labels: {}
 # example:
 # tor_prom_labels:

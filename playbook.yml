@@ -38,6 +38,22 @@
         reload: yes
       when: ansible_virtualization_type != 'lxc'
 
+    # Assemble MyFamily (the classic fingerprint list) from the offline master
+    # keys on the control machine, so relays declare the family the old way
+    # ALONGSIDE the role's FamilyId. Tor still requires MyFamily during the
+    # family-key migration. Consumed by tor_config.MyFamily in vars/main.yml.
+    # run_once registers the result for all hosts (identical list fleet-wide).
+    # Newly-added relays get their key generated during the role run, so they
+    # only join MyFamily on the NEXT run (run the playbook twice when growing).
+    - name: Assemble MyFamily from local relay fingerprints (whole family)
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.shell: |
+        awk '{print "$"$2}' {{ tor_offline_masterkey_dir | expanduser }}/*/fingerprint | paste -sd, -
+      register: tor_myfamily_build
+      changed_when: false
+
     # - set_fact:
     #     ansible_python_interpreter: "/usr/bin/python3"
 
