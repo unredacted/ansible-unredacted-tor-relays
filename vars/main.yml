@@ -82,7 +82,34 @@ tor_packages: tor
 tor_package_state: latest
 tor_binary: tor
 
-tor_config: {}
+# Tailscale IP of the Prometheus/monitoring host allowed to scrape MetricsPort.
+# SET THIS to your scraper's stable tailnet (100.64.0.0/10) address before running.
+# (Multiple scrapers: extend the policy string, e.g. "accept A/32, accept B/32, reject *".)
+tor_metricsport_scraper_ip: "100.119.17.158"
+
+tor_config:
+  # Cap memory used for internal queues. Quoted: value contains a space.
+  # NOTE: 512 MB is only just above Tor's ~256 MB floor; on a very busy exit a
+  # cap this low can make Tor kill circuits under load spikes. Raise if needed.
+  MaxMemInQueues: "512 MB"
+
+  # --- MetricsPort on the Tailscale interface (NO nginx / NO basic auth) ---
+  # Keys are intentionally lowercase: the role's tor_config blocklist
+  # (templates/torrc ~line 99) is an EXACT-CASE match on
+  # "MetricsPort"/"MetricsPortPolicy", but Tor parses option names
+  # case-insensitively, so lowercase keys render AND work. We keep
+  # tor_enableMetricsPort=false (below) so the role does not also emit its
+  # hardcoded 127.0.0.1 listener or switch on the nginx/htpasswd/scrape tasks.
+  # Single instance per host (tor_instance_limit=1) so one shared value is
+  # correct; if the limit is ever raised, all instances would collide on the
+  # same ip:port and this must become per-instance.
+  metricsport: "{{ ansible_tailscale0.ipv4.address }}:{{ tor_MetricsPort_offset }}"
+  # MetricsPortPolicy matches the SOURCE (scraper) address, NOT the bind address.
+  metricsportpolicy: "accept {{ tor_metricsport_scraper_ip }}/32, reject *"
+  # Mirror the role's behavior when it enables MetricsPort: don't advertise
+  # overload state publicly (we watch it privately via MetricsPort). Optional.
+  OverloadStatistics: 0
+
 tor_prom_labels: {}
 # example:
 # tor_prom_labels:
@@ -166,6 +193,11 @@ tor_nightly_builds: false
 tor_alpha_version: experimental
 
 # MetricsPort variables
+# MUST stay false. We bind MetricsPort to the Tailscale IP ourselves via
+# tor_config (above). Flipping true would (a) add a second, hardcoded
+# 'MetricsPort 127.0.0.1:<offset>' listener and (b) turn on the nginx reverse
+# proxy + htpasswd + prometheus scrape tasks (tor_prometheus_host is 127.0.0.1
+# below, so only THIS flag gates them).
 tor_enableMetricsPort: false
 tor_MetricsPort_offset: 33300
 
