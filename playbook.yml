@@ -15,6 +15,45 @@
     - name: Disable Tailscale DNS
       command: tailscale up --login-server=https://funnel.unredacted.net --ssh --accept-dns=false
 
+    # gather_facts runs before pre_tasks, so on a fresh host tailscale0 does not
+    # exist yet when facts are first collected. Re-gather after 'tailscale up' so
+    # ansible_tailscale0.ipv4.address is available when nusenu.relayor renders torrc.
+    - name: Re-gather network facts so ansible_tailscale0 is populated
+      ansible.builtin.setup:
+        gather_subset:
+          - "!all"
+          - network
+
+    # MetricsPort binds to the tailscale0 IP inside the same tor process as the
+    # ORPort, so a failed bind at boot takes the whole relay down. ip_nonlocal_bind
+    # lets tor bind the tailscale IP even before tailscaled has assigned it; the
+    # socket serves once the interface comes up (the keepalived/HAProxy VIP pattern).
+    - name: Allow Tor to bind the Tailscale IP before it is assigned (boot-race fix)
+      ansible.builtin.sysctl:
+        name: net.ipv4.ip_nonlocal_bind
+        value: "1"
+        sysctl_set: yes
+        sysctl_file: /etc/sysctl.d/99-tor-nonlocal-bind.conf
+        state: present
+        reload: yes
+      when: ansible_virtualization_type != 'lxc'
+
+    # Assemble MyFamily (the classic fingerprint list) from the offline master
+    # keys on the control machine, so relays declare the family the old way
+    # ALONGSIDE the role's FamilyId. Tor still requires MyFamily during the
+    # family-key migration. Consumed by tor_config.MyFamily in vars/main.yml.
+    # run_once registers the result for all hosts (identical list fleet-wide).
+    # Newly-added relays get their key generated during the role run, so they
+    # only join MyFamily on the NEXT run (run the playbook twice when growing).
+    - name: Assemble MyFamily from local relay fingerprints (whole family)
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.shell: |
+        awk '{print "$"$2}' {{ tor_offline_masterkey_dir | expanduser }}/*/fingerprint | paste -sd, -
+      register: tor_myfamily_build
+      changed_when: false
+
     # - set_fact:
     #     ansible_python_interpreter: "/usr/bin/python3"
 

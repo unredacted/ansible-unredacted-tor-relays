@@ -4,4 +4,9 @@ collections:
     version: ">=3.2.0"
 
 roles:
+  # Pinned: the MetricsPort injection in vars/main.yml relies on the role's
+  # tor_config blocklist being an EXACT-CASE match (lowercase metricsport keys
+  # slip through). A future role version that normalizes casing could silently
+  # drop those lines, so pin and re-verify the rendered torrc on any bump.
   - src: nusenu.relayor
+    version: v26.2.0
