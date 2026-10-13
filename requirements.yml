@@ -1,8 +1,4 @@
 ---
-collections:
-  - name: debops.debops
-    version: ">=3.2.0"
-
 roles:
   # Pinned: the MetricsPort injection in vars/main.yml relies on the role's
   # tor_config blocklist being an EXACT-CASE match (lowercase metricsport keys
