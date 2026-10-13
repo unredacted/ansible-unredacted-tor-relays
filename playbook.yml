@@ -3,13 +3,10 @@
   remote_user: root
   become: True
   gather_facts: yes
-  collections:
-    - debops.debops
   hosts: "{{ target }}"
   vars_files:
     - vars/main.yml
   roles:
-    - role: resolved
     - role: nusenu.relayor
   pre_tasks:
     - name: Disable Tailscale DNS
@@ -116,26 +113,198 @@
         state: restarted
       when: zt_config.changed
 
-    - name: Stop and disable Unbound before resolved takes over
-      ansible.builtin.service:
+    # Local recursive resolver for exit DNS. Unbound resolves from the root
+    # itself (no forward-zone), so exit lookups are not concentrated at a
+    # large public resolver (see the links above tor_dnsresolver_blacklist in
+    # vars/main.yml). Debian's package already enables DNSSEC validation via
+    # unbound.conf.d/root-auto-trust-anchor-file.conf. These tasks run before
+    # nusenu.relayor so its resolv.conf blacklist check sees the final state.
+
+    # Debian 12/13 and Ubuntu 24.04 ship an executable
+    # /etc/resolvconf/update.d/unbound: when resolvconf is installed, it runs
+    # `unbound-control forward` with the network's nameservers, silently
+    # turning Unbound into a forwarder. Opt out before Unbound is installed or
+    # started. (Ubuntu 22.04's older hook ships non-executable.) This file is
+    # not shipped by the package, so upgrades keep the setting.
+    - name: Disable Unbound's resolvconf forwarding hook
+      ansible.builtin.lineinfile:
+        path: /etc/default/unbound
+        regexp: '^#?\s*USE_RESOLVCONF_FORWARDS='
+        line: USE_RESOLVCONF_FORWARDS=false
+        create: yes
+        owner: root
+        group: root
+        mode: "0644"
+      register: unbound_defaults
+
+    # latest, like tor_package_state: the config below relies on distro
+    # security backports (wait-limit arrived with the DNSBomb fix).
+    - name: Ensure unbound and dig are installed and up to date
+      ansible.builtin.apt:
+        name:
+          - unbound
+          - bind9-dnsutils
+        state: latest
+        update_cache: yes
+        cache_valid_time: 3600
+
+    # Started before the config check: the unit's ExecStartPre creates the
+    # DNSSEC root key (/var/lib/unbound/root.key) that unbound-checkconf needs.
+    - name: Ensure unbound is enabled and started
+      ansible.builtin.systemd:
         name: unbound
+        state: started
+        enabled: yes
+
+    - name: Configure Unbound as a localhost-only recursive resolver
+      ansible.builtin.copy:
+        dest: /etc/unbound/unbound.conf.d/tor-exit.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          server:
+            # Localhost only: never run an open resolver on an exit.
+            interface: 127.0.0.1
+
+            # One thread on purpose: Tor sends every query from one UDP socket,
+            # and so-reuseport (default on) pins a socket's packets to a single
+            # thread, so extra threads would sit idle.
+            num-threads: 1
+
+            # Tor is the only client, and it keeps up to 8192 lookups in
+            # flight. The DNSBomb fix that Debian 12 and Ubuntu 22.04/24.04
+            # backported caps waiting queries per IP at 1000 *including
+            # loopback* (upstream exempts it), silently dropping the rest.
+            # The limit only protects against remote clients, which a
+            # loopback-only resolver has none of.
+            wait-limit: 0
+
+            # Drop the subnetcache module some distro builds load by default:
+            # it is only used with EDNS Client Subnet, which must stay off on
+            # an exit, and it logs a warning when prefetch is enabled.
+            module-config: "validator iterator"
+
+            # Send each authoritative server only the labels it needs.
+            qname-minimisation: yes
+
+            # Without IPv6 connectivity, v6 nameservers would only add timeouts.
+            do-ip6: {{ 'yes' if ansible_default_ipv6.address is defined else 'no' }}
+
+            # Sized from RAM (rrset 1/32, clamped to 32-128 MB; msg half that):
+            # Tor's default MaxMemInQueues takes 75% of RAM below 8 GB, and
+            # Unbound's RSS can reach ~2.5x its configured cache sizes.
+            rrset-cache-size: {{ [[ansible_memtotal_mb // 32, 32] | max, 128] | min }}m
+            msg-cache-size: {{ [[ansible_memtotal_mb // 64, 16] | max, 64] | min }}m
+
+            # Tor waits only 1s per attempt (2 attempts), so cut latency:
+            # refresh popular names before they expire, and fetch DNSKEYs as
+            # soon as a DS record is seen during validation.
+            prefetch: yes
+            prefetch-key: yes
+
+            # NLnet Labs' values for libevent builds (Debian/Ubuntu packages).
+            outgoing-range: 8192
+            num-queries-per-thread: 4096
+
+            # Absorb bursts of queries from Tor. Unbound starts as root and can
+            # force this; without CAP_NET_ADMIN (some LXC) it logs a warning and
+            # keeps the kernel default.
+            so-rcvbuf: 4m
+
+            hide-identity: yes
+            hide-version: yes
+      register: unbound_config
+
+    # Checks the full config (including Debian's drop-ins) before restarting,
+    # so a bad edit fails the run while the old config keeps serving.
+    - name: Check Unbound configuration
+      ansible.builtin.command: unbound-checkconf
+      changed_when: false
+
+    # Also on a hook opt-out change: a restart drops any runtime forwarders
+    # the hook may already have set.
+    - name: Restart unbound if its configuration changed
+      ansible.builtin.systemd:
+        name: unbound
+        state: restarted
+      when: unbound_config.changed or unbound_defaults.changed
+
+    # Full recursion is the point: fail if anything (a forward-zone drop-in
+    # or a runtime `unbound-control forward`) has made Unbound a forwarder.
+    - name: Verify Unbound has no forwarders
+      ansible.builtin.command: unbound-control list_forwards
+      register: unbound_forwards
+      changed_when: false
+      failed_when: unbound_forwards.rc != 0 or unbound_forwards.stdout | trim | length > 0
+
+    # Gate the resolv.conf switch on Unbound actually recursing from the root,
+    # so a host that can't reach authoritative servers keeps its current DNS
+    # and the run stops here. (dig exits 0 on SERVFAIL; +short then prints
+    # nothing.)
+    - name: Verify Unbound resolves before switching resolv.conf to it
+      ansible.builtin.command: dig +short +time=5 +tries=1 @127.0.0.1 deb.torproject.org A
+      register: unbound_dig_check
+      until: unbound_dig_check.rc == 0 and unbound_dig_check.stdout | length > 0
+      retries: 5
+      delay: 3
+      changed_when: false
+
+    # Replaces the systemd-resolved stub symlink with a regular file (copy does
+    # not follow a symlinked dest). Tor reads /etc/resolv.conf directly.
+    - name: Point resolv.conf at the local Unbound resolver
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible: local Unbound recursive resolver
+          nameserver 127.0.0.1
+      register: resolv_conf_switch
+
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    # Tor only reads resolv.conf at startup and on reload (SIGHUP -> dns_reset),
+    # so a running exit keeps sending lookups to the old nameserver (the
+    # 127.0.0.53 stub, gone once systemd-resolved is stopped below) and every
+    # exit DNS lookup fails. A reload re-reads it without dropping circuits;
+    # tor.service propagates it to every tor@ instance (ReloadPropagatedFrom).
+    # Also reload while systemd-resolved is still running: if an earlier run
+    # wrote resolv.conf but failed before this reload, the retry sees no
+    # change, yet Tor may still be using the stub.
+    - name: Reload Tor so running instances pick up the new resolv.conf
+      ansible.builtin.systemd:
+        name: tor.service
+        state: reloaded
+      when:
+        - "'tor.service' in ansible_facts.services"
+        - resolv_conf_switch.changed or
+          ansible_facts.services.get('systemd-resolved.service', {}).get('state') == 'running'
+
+    # Masked so a package upgrade or dependency can't bring it back. Hosts
+    # previously run with debops.resolved still have its config under
+    # /etc/systemd/resolved.conf.d/; it is inert while the unit is masked.
+    - name: Stop, disable and mask systemd-resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
         state: stopped
         enabled: no
-      failed_when: false
+        masked: yes
+      when: "'systemd-resolved.service' in ansible_facts.services"
 
-  post_tasks:
-    - name: Remove Unbound if previously installed
-      apt:
-        name: unbound
-        state: absent
-        purge: yes
-
-    - name: Ensure resolv.conf points to systemd-resolved stub
-      ansible.builtin.file:
-        path: /etc/resolv.conf
-        src: /run/systemd/resolve/stub-resolv.conf
-        state: link
-        force: yes
+    # Checks the system lookup path (nsswitch -> resolv.conf -> Unbound) with
+    # systemd-resolved gone. libnss-resolve from debops.resolved stays
+    # installed; its "resolve [!UNAVAIL=return]" entry falls through to dns.
+    - name: Verify system name resolution without systemd-resolved
+      ansible.builtin.command: getent ahosts deb.torproject.org
+      register: unbound_resolve_check
+      until: unbound_resolve_check.rc == 0
+      retries: 5
+      delay: 3
+      changed_when: false
 
   # - name: Set net.ipv4.tcp_fin_timeout to defined value
   #   sysctl:

@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-This Ansible playbook deploys and manages Tor relay instances on Unredacted servers. It automates the configuration of Tor relays with custom settings for exit policies, DNS-over-TLS resolution via systemd-resolved, and system-level optimizations.
+This Ansible playbook deploys and manages Tor relay instances on Unredacted servers. It automates the configuration of Tor relays with custom settings for exit policies, local recursive DNS resolution via Unbound, and system-level optimizations.
 
 ## Overview
 
@@ -14,7 +14,7 @@ This playbook uses the [`nusenu.relayor`](https://github.com/nusenu/ansible-rela
 - ZeroTier private network integration
 - System-level TCP MSS clamping to support tunneling software like ZeroTier
 - Prometheus metrics collection and alerting
-- DNS-over-TLS (DoT) resolution via systemd-resolved (Cloudflare, Mullvad, WikiMedia)
+- Local recursive DNS resolution via Unbound (no third-party upstream resolvers)
 - DNS resolver blacklisting to prevent censorship
 
 ## Prerequisites
@@ -38,9 +38,8 @@ This playbook uses the [`nusenu.relayor`](https://github.com/nusenu/ansible-rela
    cd ansible-unredacted-tor-relays
    ```
 
-2. Install required Ansible collections and roles:
+2. Install required Ansible roles:
    ```bash
-   ansible-galaxy collection install -r requirements.yml
    ansible-galaxy role install -r requirements.yml
    ```
 
@@ -115,8 +114,8 @@ ansible-unredacted-tor-relays/
 
 ### Network Configuration
 - ZeroTier private network integration
-- DNS-over-TLS (DoT) via systemd-resolved with strict mode and DNSSEC
-- Upstream resolvers: Cloudflare, Mullvad, WikiMedia (all non-logging)
+- Local Unbound recursive resolver on 127.0.0.1 with DNSSEC validation and QNAME minimisation
+- systemd-resolved is masked; `/etc/resolv.conf` points directly at Unbound
 - Blacklist of DNS resolvers to prevent censorship
 
 ### Monitoring
