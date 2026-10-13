@@ -57,64 +57,114 @@
     # - set_fact:
     #     ansible_python_interpreter: "/usr/bin/python3"
 
-    - name: Create system bootstrap script
-      ansible.builtin.copy:
-        dest: /usr/local/bin/system-bootstrap.sh
-        mode: "0755"
-        content: |
-          #!/bin/bash
+    # MSS clamp: disabled for now. It was added for tunneling over ZeroTier
+    # (removed below). To bring it back, uncomment these three tasks and
+    # delete the cleanup tasks that follow them.
+    # - name: Create system bootstrap script
+    #   ansible.builtin.copy:
+    #     dest: /usr/local/bin/system-bootstrap.sh
+    #     mode: "0755"
+    #     content: |
+    #       #!/bin/bash
+    #
+    #       IPT=/sbin/iptables
+    #       IP6T=/sbin/ip6tables
+    #
+    #       # Clamp TCP MSS to 1354 for IPv4 on output chain
+    #       $IPT -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1354 2>/dev/null || \
+    #       $IPT -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1354
+    #       echo "IPv4 MSS clamp applied"
+    #
+    #       # Clamp TCP MSS to 1334 for IPv4 on output chain
+    #       $IP6T -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1334 2>/dev/null || \
+    #       $IP6T -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1334
+    #       echo "IPv6 MSS clamp applied"
+    #
+    # - name: Create systemd unit to apply system bootstrap script boot
+    #   ansible.builtin.copy:
+    #     dest: /etc/systemd/system/system-bootstrap.service
+    #     content: |
+    #       [Unit]
+    #       Description=Apply system bootstrap script
+    #       After=network-online.target
+    #       Wants=network-online.target
+    #
+    #       [Service]
+    #       Type=oneshot
+    #       ExecStart=/usr/local/bin/system-bootstrap.sh
+    #       RemainAfterExit=yes
+    #
+    #       [Install]
+    #       WantedBy=multi-user.target
+    #
+    # - name: Enable and start system bootstrap systemd service
+    #   ansible.builtin.systemd:
+    #     name: system-bootstrap.service
+    #     enabled: yes
+    #     state: started
 
-          IPT=/sbin/iptables
-          IP6T=/sbin/ip6tables
+    # Commenting the tasks out is not enough on hosts that already ran them:
+    # the rules stay in the running firewall until reboot, and the enabled
+    # system-bootstrap.service would re-add them at every boot.
+    - name: Stop and disable the MSS clamp bootstrap service
+      ansible.builtin.command: systemctl disable --now system-bootstrap.service
+      args:
+        removes: /etc/systemd/system/system-bootstrap.service
 
-          # Clamp TCP MSS to 1354 for IPv4 on output chain
-          $IPT -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1354 2>/dev/null || \
-          $IPT -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1354
-          echo "IPv4 MSS clamp applied"
+    - name: Remove the MSS clamp bootstrap service and script
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/system-bootstrap.service
+        - /usr/local/bin/system-bootstrap.sh
+      register: mss_clamp_files
 
-          # Clamp TCP MSS to 1334 for IPv4 on output chain
-          $IP6T -t mangle -C OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1334 2>/dev/null || \
-          $IP6T -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1334
-          echo "IPv6 MSS clamp applied"
+    # Deletes only the rules system-bootstrap.sh has ever added (OUTPUT, and
+    # INPUT in older versions), from both iptables and ip6tables.
+    - name: Remove MSS clamp rules from the running firewall
+      ansible.builtin.shell: |
+        set -o pipefail
+        removed=0
+        for ipt in iptables ip6tables; do
+          command -v "$ipt" >/dev/null || continue
+          while read -r rule; do
+            $ipt -t mangle ${rule/#-A /-D }
+            removed=1
+          done < <($ipt -t mangle -S | grep -E -- '^-A (INPUT|OUTPUT) .*--tcp-flags SYN,RST SYN -j TCPMSS --set-mss [0-9]+$' || true)
+        done
+        echo "removed=$removed"
+      args:
+        executable: /bin/bash
+      register: mss_clamp_rules
+      changed_when: "'removed=1' in mss_clamp_rules.stdout"
 
-    - name: Create systemd unit to apply system bootstrap script boot
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/system-bootstrap.service
-        content: |
-          [Unit]
-          Description=Apply system bootstrap script
-          After=network-online.target
-          Wants=network-online.target
-
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/local/bin/system-bootstrap.sh
-          RemainAfterExit=yes
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Enable and start system bootstrap systemd service
-      ansible.builtin.systemd:
-        name: system-bootstrap.service
-        enabled: yes
-        state: started
-
-    - name: Copy all ZT configs in configs/zerotier -> /var/lib/zerotier-one/networks.d
-      ansible.builtin.copy:
-        src: "{{ item }}"
-        dest: "/var/lib/zerotier-one/networks.d/{{ item | basename }}"
-        owner: zerotier-one
-        group: zerotier-one
-        mode: "0644"
-      loop: "{{ query('ansible.builtin.fileglob', 'configs/zerotier/*.conf') }}"
-      register: zt_config
-
-    - name: Restart zerotier-one if configuration changed
-      ansible.builtin.systemd:
+    # ZeroTier is no longer used: Ansible and the MetricsPort scraper reach
+    # relays over Tailscale. Purging stops the service (prerm), which also
+    # drops the routes the ZeroTier controller pushed for other relays' IPs.
+    - name: Purge ZeroTier
+      ansible.builtin.apt:
         name: zerotier-one
-        state: restarted
-      when: zt_config.changed
+        state: absent
+        purge: yes
+      register: zerotier_purge
+
+    # None of these are owned by the package, so purge leaves them behind:
+    # the node identity (identity.secret), network configs and peer cache,
+    # plus the apt source and signing key added by ZeroTier's installer.
+    - name: Remove ZeroTier state, apt source and signing key
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/zerotier-one
+        - /etc/apt/sources.list.d/zerotier.list
+        - /usr/share/keyrings/zerotier-debian-package-key.gpg
+
+    - name: Reload systemd after removing the bootstrap and ZeroTier units
+      ansible.builtin.systemd:
+        daemon_reload: yes
+      when: mss_clamp_files.changed or zerotier_purge.changed
 
     - name: Stop and disable Unbound before resolved takes over
       ansible.builtin.service:

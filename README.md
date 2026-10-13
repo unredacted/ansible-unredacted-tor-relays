@@ -11,8 +11,6 @@ This playbook uses the [`nusenu.relayor`](https://github.com/nusenu/ansible-rela
 - Multiple Tor instances (one per public IP address)
 - Exit relay configuration with reduced exit policy
 - IPv6 support for both ORPort and exiting
-- ZeroTier private network integration
-- System-level TCP MSS clamping to support tunneling software like ZeroTier
 - Prometheus metrics collection and alerting
 - DNS-over-TLS (DoT) resolution via systemd-resolved (Cloudflare, Mullvad, WikiMedia)
 - DNS resolver blacklisting to prevent censorship
@@ -96,8 +94,6 @@ See `vars/main.yml` for the complete exit policy list.
 
 ```
 ansible-unredacted-tor-relays/
-├── configs/
-│   └── zerotier/                           # ZeroTier network configurations
 ├── files/
 │   └── nicknames.csv                       # Tor relay nickname mappings
 ├── vars/
@@ -109,12 +105,7 @@ ansible-unredacted-tor-relays/
 
 ## Features
 
-### System Bootstrap
-- TCP MSS clamping for IPv4 (1354) and IPv6 (1334)
-- Systemd service for applying network settings on boot
-
 ### Network Configuration
-- ZeroTier private network integration
 - DNS-over-TLS (DoT) via systemd-resolved with strict mode and DNSSEC
 - Upstream resolvers: Cloudflare, Mullvad, WikiMedia (all non-logging)
 - Blacklist of DNS resolvers to prevent censorship
@@ -132,10 +123,6 @@ ansible-unredacted-tor-relays/
 - Offline master key generation support
 - Automatic torrc backups on changes
 - Password protection for MetricsPort (optional)
-
-## ZeroTier Integration
-
-ZeroTier network configurations should be placed in `configs/zerotier/` as `.conf` files. The playbook will automatically copy these to `/var/lib/zerotier-one/networks.d/` and restart the ZeroTier service.
 
 ## License
 
