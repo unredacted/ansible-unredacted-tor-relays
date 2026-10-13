@@ -120,18 +120,26 @@
         - /usr/local/bin/system-bootstrap.sh
       register: mss_clamp_files
 
-    # Deletes only the rules system-bootstrap.sh has ever added (OUTPUT, and
-    # INPUT in older versions), from both iptables and ip6tables.
+    # Deletes only the exact rules system-bootstrap.sh has ever added (per git
+    # history: IPv4 MSS 1300/1354 and IPv6 MSS 1334, on mangle INPUT/OUTPUT,
+    # with no other selectors), so independently managed MSS rules survive.
+    # -w waits for the xtables lock, and any failed list or delete fails the
+    # task (errexit) instead of leaving a clamp behind while reporting success.
     - name: Remove MSS clamp rules from the running firewall
       ansible.builtin.shell: |
-        set -o pipefail
+        set -o errexit -o pipefail
+        rule_re='-A (INPUT|OUTPUT) -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss'
         removed=0
-        for ipt in iptables ip6tables; do
+        for spec in "iptables (1300|1354)" "ip6tables 1334"; do
+          read -r ipt mss <<< "$spec"
           command -v "$ipt" >/dev/null || continue
+          rules=$("$ipt" -w -t mangle -S)
+          matches=$(grep -xE -- "$rule_re $mss" <<< "$rules" || true)
           while read -r rule; do
-            $ipt -t mangle ${rule/#-A /-D }
+            [ -n "$rule" ] || continue
+            "$ipt" -w -t mangle ${rule/#-A /-D }
             removed=1
-          done < <($ipt -t mangle -S | grep -E -- '^-A (INPUT|OUTPUT) .*--tcp-flags SYN,RST SYN -j TCPMSS --set-mss [0-9]+$' || true)
+          done <<< "$matches"
         done
         echo "removed=$removed"
       args:
