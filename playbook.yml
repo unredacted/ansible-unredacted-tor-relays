@@ -119,6 +119,24 @@
     # vars/main.yml). Debian's package already enables DNSSEC validation via
     # unbound.conf.d/root-auto-trust-anchor-file.conf. These tasks run before
     # nusenu.relayor so its resolv.conf blacklist check sees the final state.
+
+    # Debian 12/13 and Ubuntu 24.04 ship an executable
+    # /etc/resolvconf/update.d/unbound: when resolvconf is installed, it runs
+    # `unbound-control forward` with the network's nameservers, silently
+    # turning Unbound into a forwarder. Opt out before Unbound is installed or
+    # started. (Ubuntu 22.04's older hook ships non-executable.) This file is
+    # not shipped by the package, so upgrades keep the setting.
+    - name: Disable Unbound's resolvconf forwarding hook
+      ansible.builtin.lineinfile:
+        path: /etc/default/unbound
+        regexp: '^#?\s*USE_RESOLVCONF_FORWARDS='
+        line: USE_RESOLVCONF_FORWARDS=false
+        create: yes
+        owner: root
+        group: root
+        mode: "0644"
+      register: unbound_defaults
+
     # latest, like tor_package_state: the config below relies on distro
     # security backports (wait-limit arrived with the DNSBomb fix).
     - name: Ensure unbound and dig are installed and up to date
@@ -205,11 +223,21 @@
       ansible.builtin.command: unbound-checkconf
       changed_when: false
 
-    - name: Restart unbound if configuration changed
+    # Also on a hook opt-out change: a restart drops any runtime forwarders
+    # the hook may already have set.
+    - name: Restart unbound if its configuration changed
       ansible.builtin.systemd:
         name: unbound
         state: restarted
-      when: unbound_config.changed
+      when: unbound_config.changed or unbound_defaults.changed
+
+    # Full recursion is the point: fail if anything (a forward-zone drop-in
+    # or a runtime `unbound-control forward`) has made Unbound a forwarder.
+    - name: Verify Unbound has no forwarders
+      ansible.builtin.command: unbound-control list_forwards
+      register: unbound_forwards
+      changed_when: false
+      failed_when: unbound_forwards.rc != 0 or unbound_forwards.stdout | trim | length > 0
 
     # Gate the resolv.conf switch on Unbound actually recursing from the root,
     # so a host that can't reach authoritative servers keeps its current DNS
@@ -244,13 +272,17 @@
     # 127.0.0.53 stub, gone once systemd-resolved is stopped below) and every
     # exit DNS lookup fails. A reload re-reads it without dropping circuits;
     # tor.service propagates it to every tor@ instance (ReloadPropagatedFrom).
+    # Also reload while systemd-resolved is still running: if an earlier run
+    # wrote resolv.conf but failed before this reload, the retry sees no
+    # change, yet Tor may still be using the stub.
     - name: Reload Tor so running instances pick up the new resolv.conf
       ansible.builtin.systemd:
         name: tor.service
         state: reloaded
       when:
-        - resolv_conf_switch.changed
         - "'tor.service' in ansible_facts.services"
+        - resolv_conf_switch.changed or
+          ansible_facts.services.get('systemd-resolved.service', {}).get('state') == 'running'
 
     # Masked so a package upgrade or dependency can't bring it back. Hosts
     # previously run with debops.resolved still have its config under
