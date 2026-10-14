@@ -42,8 +42,9 @@
     # netplan images nmcli cannot store a token (NetworkManager requires
     # addr-gen-mode eui64 with it, netplan rejects the two together).
     # Hosts are picked by the SLAAC address the EFG's router advertisements
-    # give them before their first run, so keep RA on in UniFi. Everything
-    # else (other relays, and the Pis routed over IPsec) keeps tor_IPv6 false.
+    # give them before their first run (so keep RA on in UniFi), and after
+    # that by a local fact the play leaves on them. Everything else (other
+    # relays, and the Pis routed over IPsec) keeps tor_IPv6 false.
     - name: Derive the MCI1 IPv6 address from the fixed IPv4
       ansible.builtin.set_fact:
         tor_mci1_ipv6_address: "{{ tor_mci1_ipv6_net }}{{ tor_mci1_octet }}"
@@ -51,7 +52,9 @@
       vars:
         tor_mci1_ipv6_net: "{{ tor_mci1_ipv6_prefix | ansible.utils.ipaddr('network') }}"
         tor_mci1_octet: "{{ ansible_default_ipv4.address.split('.')[-1] }}"
-      when: ansible_all_ipv6_addresses | ansible.utils.ipaddr(tor_mci1_ipv6_prefix) | length > 0
+      when: >-
+        ansible_all_ipv6_addresses | ansible.utils.ipaddr(tor_mci1_ipv6_prefix) | length > 0
+        or 'tor_mci1_ipv6' in (ansible_local | default({}))
 
     - name: Find the NetworkManager profile on the IPv4 default interface
       ansible.builtin.command:
@@ -105,6 +108,24 @@
       retries: 10
       delay: 3
       changed_when: false
+      when: tor_mci1_ipv6_address is defined
+
+    # Once configured, a host has only its static address and gets no SLAAC
+    # address in a new prefix. Without this marker, changing
+    # tor_mci1_ipv6_prefix would skip it, and relayor would drop IPv6 from
+    # torrc while the old static address stayed.
+    - name: Create the Ansible local facts directory
+      ansible.builtin.file:
+        path: /etc/ansible/facts.d
+        state: directory
+        mode: "0755"
+      when: tor_mci1_ipv6_address is defined
+
+    - name: Mark the host as managed on the MCI1 IPv6 network
+      ansible.builtin.copy:
+        dest: /etc/ansible/facts.d/tor_mci1_ipv6.fact
+        content: "{{ {'address': tor_mci1_ipv6_address} | to_nice_json }}\n"
+        mode: "0644"
       when: tor_mci1_ipv6_address is defined
 
     # Same boot race as the Tailscale bind above: the address only appears
