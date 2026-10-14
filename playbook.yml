@@ -35,6 +35,120 @@
         reload: yes
       when: ansible_virtualization_type != 'lxc'
 
+    # IPv6 on the MCI1 Pi network: each Pi gets <prefix>::<last IPv4 octet>
+    # (23.191.200.7 -> 2602:f7d8:0:1337::7), derived from the fixed IPv4 set
+    # in UniFi, so that stays the only per-node setting. The address and
+    # gateway are static in NetworkManager rather than an SLAAC token: on the
+    # netplan images nmcli cannot store a token (NetworkManager requires
+    # addr-gen-mode eui64 with it, netplan rejects the two together).
+    # Hosts are picked by the SLAAC address the EFG's router advertisements
+    # give them before their first run (so keep RA on in UniFi), and after
+    # that by a local fact the play leaves on them. Everything else (other
+    # relays, and the Pis routed over IPsec) keeps tor_IPv6 false.
+    - name: Derive the MCI1 IPv6 address from the fixed IPv4
+      ansible.builtin.set_fact:
+        tor_mci1_ipv6_address: "{{ tor_mci1_ipv6_net }}{{ tor_mci1_octet }}"
+        tor_mci1_ipv6_cidr: "{{ tor_mci1_ipv6_net }}{{ tor_mci1_octet }}/{{ tor_mci1_ipv6_prefix | ansible.utils.ipaddr('prefix') }}"
+      vars:
+        tor_mci1_ipv6_net: "{{ tor_mci1_ipv6_prefix | ansible.utils.ipaddr('network') }}"
+        tor_mci1_octet: "{{ ansible_default_ipv4.address.split('.')[-1] }}"
+      when: >-
+        ansible_all_ipv6_addresses | ansible.utils.ipaddr(tor_mci1_ipv6_prefix) | length > 0
+        or 'tor_mci1_ipv6' in (ansible_local | default({}))
+
+    - name: Find the NetworkManager profile on the IPv4 default interface
+      ansible.builtin.command:
+        argv: [nmcli, -g, GENERAL.CONNECTION, device, show, "{{ ansible_default_ipv4.interface }}"]
+      register: tor_mci1_nm_profile
+      changed_when: false
+      when: tor_mci1_ipv6_address is defined
+
+    - name: Read the profile's IPv6 settings
+      ansible.builtin.command:
+        # --escape no: -g output otherwise escapes every colon (2602\:f7d8\:...).
+        argv: [nmcli, --escape, "no", -g, "ipv6.method,ipv6.addresses,ipv6.gateway", connection, show, "{{ tor_mci1_nm_profile.stdout }}"]
+      register: tor_mci1_nm_ipv6
+      changed_when: false
+      when: tor_mci1_ipv6_address is defined
+
+    # method manual also stops SLAAC, so this is the host's only global
+    # IPv6 address.
+    - name: Set the static IPv6 address and gateway on the profile
+      ansible.builtin.command:
+        argv:
+          - nmcli
+          - connection
+          - modify
+          - "{{ tor_mci1_nm_profile.stdout }}"
+          - ipv6.method
+          - manual
+          - ipv6.addresses
+          - "{{ tor_mci1_ipv6_cidr }}"
+          - ipv6.gateway
+          - "{{ tor_mci1_ipv6_gateway }}"
+      register: tor_mci1_nm_modify
+      when:
+        - tor_mci1_ipv6_address is defined
+        - tor_mci1_nm_ipv6.stdout_lines != ['manual', tor_mci1_ipv6_cidr, tor_mci1_ipv6_gateway]
+
+    # reapply updates the running device in place; 'connection up' would
+    # take eth0 (and every Tor connection on it) down and back up.
+    - name: Apply the IPv6 settings without taking the link down
+      ansible.builtin.command:
+        argv: [nmcli, device, reapply, "{{ ansible_default_ipv4.interface }}"]
+      when: tor_mci1_nm_modify is changed
+
+    # Fail here, before relayor writes the address into torrc, unless the
+    # address is up (past DAD) and the gateway answers to it.
+    - name: Wait until the IPv6 gateway answers from the new address
+      ansible.builtin.command:
+        argv: [ping, -6, -c, "1", -W, "2", -I, "{{ tor_mci1_ipv6_address }}", "{{ tor_mci1_ipv6_gateway }}"]
+      register: tor_mci1_ping
+      until: tor_mci1_ping.rc == 0
+      retries: 10
+      delay: 3
+      changed_when: false
+      when: tor_mci1_ipv6_address is defined
+
+    # Once configured, a host has only its static address and gets no SLAAC
+    # address in a new prefix. Without this marker, changing
+    # tor_mci1_ipv6_prefix would skip it, and relayor would drop IPv6 from
+    # torrc while the old static address stayed.
+    - name: Create the Ansible local facts directory
+      ansible.builtin.file:
+        path: /etc/ansible/facts.d
+        state: directory
+        mode: "0755"
+      when: tor_mci1_ipv6_address is defined
+
+    - name: Mark the host as managed on the MCI1 IPv6 network
+      ansible.builtin.copy:
+        dest: /etc/ansible/facts.d/tor_mci1_ipv6.fact
+        content: "{{ {'address': tor_mci1_ipv6_address} | to_nice_json }}\n"
+        mode: "0644"
+      when: tor_mci1_ipv6_address is defined
+
+    # Same boot race as the Tailscale bind above: the address only appears
+    # once NetworkManager has brought eth0 up and DAD has finished, and a
+    # failed bind of the IPv6 ORPort would take the whole relay down.
+    - name: Allow Tor to bind its IPv6 address before it is assigned (boot-race fix)
+      ansible.builtin.sysctl:
+        name: net.ipv6.ip_nonlocal_bind
+        value: "1"
+        sysctl_set: yes
+        sysctl_file: /etc/sysctl.d/99-tor-nonlocal-bind.conf
+        state: present
+        reload: yes
+      when: tor_mci1_ipv6_address is defined
+
+    # Pin the address instead of relying on relayor's auto-detection, so
+    # torrc never depends on which addresses happened to exist at fact time.
+    - name: Enable Tor IPv6 (ORPort and exit) on the static address
+      ansible.builtin.set_fact:
+        tor_IPv6: true
+        tor_v6ips: ["{{ tor_mci1_ipv6_address }}"]
+      when: tor_mci1_ipv6_address is defined
+
     # Assemble MyFamily (the classic fingerprint list) from the offline master
     # keys on the control machine, so relays declare the family the old way
     # ALONGSIDE the role's FamilyId. Tor still requires MyFamily during the

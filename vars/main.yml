@@ -86,7 +86,16 @@ tor_ExitRelay: True
 tor_ExitNoticePage: True
 
 # automatically detect IPv6 addresses and enable IPv6 ORPort
+# Stays false fleet-wide. The playbook turns it on, pinned to a fixed
+# address, only for hosts on the MCI1 Pi network (tor_mci1_ipv6_prefix).
 tor_IPv6: false
+
+# IPv6 on the MCI1 Pi network (UniFi EFG edge1-mci1-net). Each Pi there gets
+# the static address <prefix>::<last IPv4 octet>, e.g. 23.191.200.7 ->
+# 2602:f7d8:0:1337::7, with the EFG as gateway. Keep both in sync with the
+# network's IPv6 settings in UniFi.
+tor_mci1_ipv6_prefix: "2602:f7d8:0:1337::/64"
+tor_mci1_ipv6_gateway: "2602:f7d8:0:1337::1"
 
 # enable IPv6 exiting
 # the following var only matters if
