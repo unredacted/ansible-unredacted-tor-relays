@@ -166,6 +166,68 @@
         - /etc/apt/sources.list.d/zerotier.list
         - /usr/share/keyrings/zerotier-debian-package-key.gpg
 
+    # Debian 13 dropped the real dstat: there `dstat` is a virtual package
+    # provided by pcp, so installing it (ansible-sane-defaults does) pulls in
+    # the whole Performance Co-Pilot daemon set. pmcd (44321), pmproxy
+    # (44322/44323) and pmlogger (4330) listen on all interfaces: anyone can
+    # read every system metric, including per-interface byte counters, and
+    # pmproxy will open TCP connections to any host:port on a client's behalf.
+    # Nothing here uses PCP (node_exporter and Alloy, both bound to Tailscale,
+    # are the monitoring stack), so purge it.
+
+    # pcp's prerm only stops pmcd and pmlogger under systemd: pmproxy, pmie,
+    # the *_farm services and the timers keep running from deleted binaries,
+    # pmproxy still listening. Stop every loaded PCP unit first (works with
+    # or without unit files), then clear any failed ones (timers orphaned by
+    # an earlier purge) so they don't linger in systemctl --failed.
+    - name: Stop all Performance Co-Pilot services and timers
+      ansible.builtin.shell: |
+        set -o errexit -o pipefail
+        pcp_units() {
+          systemctl list-units --all --plain --no-legend \
+            'pmcd*' 'pmlogger*' 'pmie*' 'pmproxy*' 'pmfind*'
+        }
+        running=$(pcp_units | awk '$3 != "inactive" && $3 != "failed" {print $1}')
+        [ -z "$running" ] || systemctl stop $running
+        failed=$(pcp_units | awk '$3 == "failed" {print $1}')
+        [ -z "$failed" ] || systemctl reset-failed $failed
+        echo "stopped=[$(echo $running)] reset=[$(echo $failed)]"
+      args:
+        executable: /bin/bash
+      register: pcp_stop
+      changed_when: pcp_stop.stdout != 'stopped=[] reset=[]'
+
+    # Packages are listed by name instead of autoremoved so unrelated
+    # orphans stay.
+    - name: Purge Performance Co-Pilot (pulled in by dstat on Debian 13)
+      ansible.builtin.apt:
+        name:
+          - pcp
+          - pcp-conf
+          - python3-pcp
+          - libpcp3
+          - libpcp-archive1
+          - libpcp-gui2
+          - libpcp-import1
+          - libpcp-mmv1
+          - libpcp-pmda-perl
+          - libpcp-pmda3
+          - libpcp-trace2
+          - libpcp-web1
+        state: absent
+        purge: yes
+
+    # Purge leaves the archives (~80 MB), the generated PMNS and runtime
+    # files behind. The pcp system user stays, as Debian packages leave it.
+    - name: Remove Performance Co-Pilot archives and state
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/log/pcp
+        - /var/lib/pcp
+        - /run/pcp
+
     - name: Reload systemd after removing the bootstrap and ZeroTier units
       ansible.builtin.systemd:
         daemon_reload: yes
