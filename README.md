@@ -72,8 +72,10 @@ Key variables that can be customized in `vars/main.yml`:
 | `tor_ContactInfo` | Contact information for the relay operator | `email:admin[@]unredacted.org` |
 | `tor_ports` | ORPort and DirPort configuration | `[orport: 443, dirport: 80]` |
 | `tor_ExitRelay` | Enable exit relay mode | `true` |
-| `tor_IPv6` | Enable IPv6 ORPort auto-detection | `false` |
+| `tor_IPv6` | Enable IPv6 ORPort auto-detection (turned on per host for the MCI1 Pis, see below) | `false` |
 | `tor_IPv6Exit` | Enable IPv6 exiting | `true` |
+| `tor_mci1_ipv6_prefix` | IPv6 /64 of the MCI1 Pi network; hosts with an address in it get a static `<prefix>::<last IPv4 octet>` and Tor IPv6 (ORPort and exit) | `2602:f7d8:0:1337::/64` |
+| `tor_mci1_ipv6_gateway` | IPv6 gateway (the UniFi EFG) for the MCI1 Pi network | `2602:f7d8:0:1337::1` |
 | `tor_instance_limit` | Maximum tor instances per server | `1` |
 | `tor_dnsresolver_blacklist` | Blacklisted DNS resolvers | Quad9 (enabled), Google/OpenDNS (commented) |
 
