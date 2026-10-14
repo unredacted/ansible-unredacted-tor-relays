@@ -197,25 +197,28 @@
       register: pcp_stop
       changed_when: pcp_stop.stdout != 'stopped=[] reset=[]'
 
-    # Packages are listed by name instead of autoremoved so unrelated
+    # Purge the PCP packages actually present (installed, or removed with
+    # config files left) rather than a fixed list: library names differ by
+    # release (Ubuntu 24.04 has libpcp3t64 and other *t64 names), and apt
+    # silently skips names it doesn't know. Not autoremoved, so unrelated
     # orphans stay.
+    - name: Find Performance Co-Pilot packages
+      ansible.builtin.shell: |
+        set -o pipefail
+        dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' |
+          awk 'substr($1, 2, 1) != "n" && $2 ~ /^(pcp(-.*)?|libpcp.*|python3-pcp)$/ {print $2}'
+      args:
+        executable: /bin/bash
+      register: pcp_packages
+      changed_when: false
+      check_mode: false
+
     - name: Purge Performance Co-Pilot (pulled in by dstat on Debian 13)
       ansible.builtin.apt:
-        name:
-          - pcp
-          - pcp-conf
-          - python3-pcp
-          - libpcp3
-          - libpcp-archive1
-          - libpcp-gui2
-          - libpcp-import1
-          - libpcp-mmv1
-          - libpcp-pmda-perl
-          - libpcp-pmda3
-          - libpcp-trace2
-          - libpcp-web1
+        name: "{{ pcp_packages.stdout_lines }}"
         state: absent
         purge: yes
+      when: pcp_packages.stdout_lines | length > 0
 
     # Purge leaves the archives (~80 MB), the generated PMNS and runtime
     # files behind. The pcp system user stays, as Debian packages leave it.
