@@ -19,7 +19,9 @@ tor_binary: tor
 # (Multiple scrapers: extend the policy string, e.g. "accept A/32, accept B/32, reject *".)
 tor_metricsport_scraper_ip: "100.119.17.158"
 
-tor_config:
+# torrc options for every relay. tor_config (below tor_dircache_kept_hosts)
+# adds the per-host options to these.
+tor_config_common:
   # Cap memory used for internal queues. Quoted: value contains a space.
   # NOTE: 512 MB is only just above Tor's ~256 MB floor; on a very busy exit a
   # cap this low can make Tor kill circuits under load spikes. Raise if needed.
@@ -51,6 +53,28 @@ tor_config:
   # the role's tor_config blocklist, so it renders next to FamilyId per torrc.
   MyFamily: "{{ tor_myfamily_build.stdout }}"
 
+# Relays stop serving directory requests (DirCache 0), except those listed
+# in tor_dircache_kept_hosts.
+# Since mid-September 2026, floods of BEGIN_DIR requests (about 1,000/s,
+# about 50 KB per response) pin Tor's main thread on the targeted relays.
+# Their ORPort accept queue overflows, so they fail reachability tests and
+# lose Running. On 2026-10-19 the combined responses also saturated the
+# MCI1 uplink for every relay there. Tor has no rate limit for BEGIN_DIR;
+# with DirCache 0 it answers each one with a single END cell.
+# Cost: the HSDir, V2Dir and Guard flags (Guard is unused while the
+# consensus has Wgd=0), and the DirPort, which Tor refuses to run with
+# DirCache 0. The exit notice page on port 80 goes with it.
+
+# relay30 and relay33 keep serving: they are in Tor's built-in fallback
+# directory list, which clients bootstrap from.
+tor_dircache_kept_hosts:
+  - pi-exit-relay30-tor-ce
+  - pi-exit-relay33-tor-ce
+
+tor_dircache_disabled: "{{ inventory_hostname not in tor_dircache_kept_hosts }}"
+
+tor_config: "{{ tor_config_common | combine({'DirCache': 0} if tor_dircache_disabled else {}) }}"
+
 tor_prom_labels: {}
 # example:
 # tor_prom_labels:
@@ -63,9 +87,10 @@ tor_ciiss_proof_folder: '~/.tor'
 # The tor_ports dictionary defines the ORPort/DirPort pairs per instance.
 # min entries: 1
 # max entries: 2
+# dirport 0 means no DirPort: relays with DirCache 0 can't have one.
 tor_ports:
   - orport: 443
-    dirport: 80
+    dirport: "{{ 0 if tor_dircache_disabled else 80 }}"
 
 # Cap tor instances per host. v26.1.0 default is 2;
 # we keep 1 to preserve current fleet behavior.
